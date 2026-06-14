@@ -13,7 +13,6 @@ Asia-Pacific economies contracted by just 0.4% in 2020 compared to a global cont
 ├── Dataset_Cleaned.csv            # Cleaned, analysis-ready dataset
 ├── Dataset_Cleaning.Rmd           # Full data cleaning pipeline (R)
 ├── Main_Econometrics_Project.Rmd  # Regression modelling and diagnostics (R)
-└── EC6062_Project_Report_final.pdf  # Full written report
 ```
  
 ---
