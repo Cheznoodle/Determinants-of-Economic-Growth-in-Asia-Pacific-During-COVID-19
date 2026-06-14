@@ -1,7 +1,3 @@
-A cross-sectional regression study identifying the macroeconomic drivers of GDP per capita growth across 52 Asia-Pacific economies during the 2020 COVID-19 crisis, using World Bank World Development Indicators data.
- 
----
- 
 ## Overview
  
 Asia-Pacific economies contracted by just 0.4% in 2020 compared to a global contraction of ~3.1%, making them a compelling case for understanding what underpins economic resilience during a crisis. This project builds and validates an OLS regression model to identify which macroeconomic factors significantly explain variation in GDP per capita growth across the region.
