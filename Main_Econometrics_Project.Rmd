@@ -1,0 +1,276 @@
+---
+title: "Main_Econometrics_Project"
+output: html_document
+date: "2026-03-27"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r packages}
+# ---- Packages ----
+packages <- c(
+  "readr", "dplyr", "ggplot2", "broom", "tidyr",
+  "lmtest", "sandwich", "car", "tibble", "mice", "skimr", "kableExtra"
+)
+
+to_install <- packages[!packages %in% installed.packages()[, "Package"]]
+if (length(to_install) > 0) install.packages(to_install)
+
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(broom)
+library(lmtest)
+library(sandwich)
+library(car)
+library(tibble)
+library(mice)
+library(tidyr)
+library(knitr)
+library(kableExtra)
+```
+
+```{r load data}
+# ---- 1) Load cleaned dataset ----
+df <- read_csv("Dataset_Cleaned.csv", show_col_types = FALSE)
+
+# ---- REQUIRED COLUMN CHECKS ----
+required_cols <- c(
+  "country", "iso3c", "year",
+  "gdp_pc_growth",
+  "inflation",
+  "fiscal_balance_pct_gdp",
+  "current_account_balance_pct_gdp",
+  "gross_capital_formation_pct_gdp",
+  "labour_force_participation",
+  "exports_pct_gdp"
+)
+
+missing_cols <- setdiff(required_cols, names(df))
+if (length(missing_cols) > 0) {
+  stop(
+    paste0(
+      "\nERROR: Your dataset is missing required columns:\n- ",
+      paste(missing_cols, collapse = "\n- "),
+      "\n\nTip: Run names(df) to see the exact column names in your file.\n"
+    )
+  )
+}
+
+# ---- Multiple imputation ----
+# This fills missing values before selecting the 2020 cross-section
+df_imputed <- mice(df, m = 5, method = "pmm", seed = 123, printFlag = FALSE)
+df_complete <- complete(df_imputed, 1)
+
+# ---- Create layman-friendly aliases ----
+df <- df_complete %>%
+  mutate(
+    fiscal = fiscal_balance_pct_gdp,
+    current_account = current_account_balance_pct_gdp,
+    gross_capital_formation = gross_capital_formation_pct_gdp,
+    labor_force = labour_force_participation,
+    exports = exports_pct_gdp
+  )
+
+# ---- FILTER TO CROSS-SECTIONAL DATA: YEAR 2020 ONLY ----
+df <- df %>%
+  filter(year == 2020)
+
+if (nrow(df) == 0) {
+  stop("\nERROR: No observations found for year 2020 in Dataset_Cleaned.csv\n")
+}
+```
+
+```{r descriptive}
+# ---- 2) Dataset overview ----
+cat("\n================ DATASET OVERVIEW ================\n")
+cat("Dataset type: Cross-sectional\n")
+cat("Year used:", 2020, "\n")
+cat("Rows:", nrow(df), "\n")
+cat("Columns:", ncol(df), "\n")
+cat("Countries:", n_distinct(df$country), "\n\n")
+
+df
+
+# ---- 3) Per-country descriptive statistics ----
+numeric_vars <- c(
+  "gdp_pc_growth", "inflation", "fiscal",
+  "current_account", "gross_capital_formation",
+  "labor_force", "exports"
+)
+
+# ---- 4) Prepare regression dataset ----
+model_df <- df %>%
+  select(
+    country, iso3c, year,
+    gdp_pc_growth, inflation, fiscal, current_account,
+    gross_capital_formation, labor_force, exports
+  ) %>%
+  filter(complete.cases(.))
+
+cat("\nObservations used in regressions (2020 complete cases):", nrow(model_df), "\n")
+
+if (nrow(model_df) == 0) {
+  stop("\nERROR: No complete-case observations available for the 2020 regression sample.\n")
+}
+
+model_df %>%
+  select(gdp_pc_growth, inflation, fiscal, current_account,
+         gross_capital_formation, labor_force, exports) %>%
+  summarise(across(everything(), list(
+    N      = ~ sum(!is.na(.)),
+    Mean   = ~ round(mean(., na.rm = TRUE), 3),
+    SD     = ~ round(sd(., na.rm = TRUE), 3),
+    Min    = ~ round(min(., na.rm = TRUE), 3),
+    Median = ~ round(median(., na.rm = TRUE), 3),
+    Max    = ~ round(max(., na.rm = TRUE), 3)
+  ))) %>%
+  pivot_longer(everything(),
+               names_to  = c("Variable", "Statistic"),
+               names_sep = "_(?=[^_]+$)") %>%
+  pivot_wider(names_from = Statistic, values_from = value) %>%
+  kable(caption = "Descriptive Statistics — 2020 Cross-Section") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+Section 2.5 Exploratory Data Analysis (EDA)
+```{r histogram}
+# ==========================================================
+# ---- HISTOGRAMS FOR EACH VARIABLE ----
+# ==========================================================
+
+p_hist_gdp <- ggplot(df, aes(x = gdp_pc_growth)) +
+  geom_histogram(bins = 25, alpha = 0.85) +
+  labs(
+    title = "Distribution of GDP per Capita Growth (2020 Cross-Section)",
+    x = "GDP per Capita Growth (%)",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+print(p_hist_gdp)
+```
+Section 3.1 - Baseline Model
+```{r baseline_model}
+# ==========================================================
+# ---- BASELINE MODEL ----
+# ==========================================================
+baseline_model <- lm(
+  gdp_pc_growth ~ inflation +
+    fiscal +
+    current_account +
+    gross_capital_formation +
+    labor_force +
+    exports,
+  data = model_df
+)
+
+cat("\n================ BASELINE REGRESSION RESULTS ================\n")
+print(summary(baseline_model))
+
+
+cat("\n================ BASELINE MODEL EQUATION (ESTIMATED FROM 2020 CROSS-SECTION) ================\n")
+cat(
+  "GDPpcGrowth_hat = ",
+  round(coef(baseline_model)[1], 3),
+  ifelse(coef(baseline_model)["inflation"] >= 0, " + ", " - "),
+  abs(round(coef(baseline_model)["inflation"], 3)), "*Inflation",
+  ifelse(coef(baseline_model)["fiscal"] >= 0, " + ", " - "),
+  abs(round(coef(baseline_model)["fiscal"], 3)), "*Fiscal\n",
+  ifelse(coef(baseline_model)["current_account"] >= 0, " + ", " - "),
+  abs(round(coef(baseline_model)["current_account"], 3)), "*CurrentAccount",
+  ifelse(coef(baseline_model)["gross_capital_formation"] >= 0, " + ", " - "),
+  abs(round(coef(baseline_model)["gross_capital_formation"], 3)), "*GrossCapitalFormation",
+  ifelse(coef(baseline_model)["labor_force"] >= 0, " + ", " - "),
+  abs(round(coef(baseline_model)["labor_force"], 3)), "*LaborForceParticipation",
+  ifelse(coef(baseline_model)["exports"] >= 0, " + ", " - "),
+  abs(round(coef(baseline_model)["exports"], 3)), "*Exports",
+  sep = ""
+)
+cat("\n===============================================================================================\n")
+# ---- VIF (Baseline) ----
+cat("\n--- VIF (Baseline model) ---\n")
+print(car::vif(baseline_model))
+
+cat("\n===============================================================================================\n")
+# ---- Joint hypothesis testing (Baseline) ----
+cat("\nJoint hypothesis testing (Baseline)")
+linearHypothesis(baseline_model, c("inflation = 0", "fiscal = 0", "labor_force = 0", "exports = 0"))
+
+cat("\n===============================================================================================\n")
+# ---- RESET test (Baseline) ----
+cat("\nRESET test on baseline model:\n")
+print(lmtest::resettest(baseline_model))
+```
+Section 3.2 - Final Model
+```{r final_model}
+# ==========================================================
+# ---- IMPROVED FINAL MODEL ----
+# ==========================================================
+final_model <- lm(
+  gdp_pc_growth ~ current_account + gross_capital_formation,
+  data = model_df
+)
+
+cat("\n================ IMPROVED FINAL REGRESSION RESULTS ================\n")
+print(summary(final_model))
+
+cat("\n================ IMPROVED FINAL MODEL EQUATION (ESTIMATED FROM 2020 CROSS-SECTION) ================\n")
+cat(
+  "GDPpcGrowth_hat = ",
+  round(coef(final_model)[1], 3),
+  ifelse(coef(final_model)["current_account"] >= 0, " + ", " - "),
+  abs(round(coef(final_model)["current_account"], 3)), "*CurrentAccount",
+  ifelse(coef(final_model)["gross_capital_formation"] >= 0, " + ", " - "),
+  abs(round(coef(final_model)["gross_capital_formation"], 3)), "*GrossCapitalFormation\n",
+  sep = ""
+)
+cat("\n===============================================================================================\n")
+# ---- Confidence Interval ----
+cat("\n--- Confidence Interval ---\n")
+confint(final_model)
+cat("\n===============================================================================================\n")
+# ---- RESET test (Final) ----
+cat("\nRESET test on final model:\n")
+print(lmtest::resettest(final_model))
+
+# ---- BP test (Final) ----
+cat("\n================ IMPROVED FINAL: HETEROSKEDASTICITY CHECKS ================\n")
+cat("Breusch–Pagan test:\n")
+print(lmtest::bptest(final_model))
+
+critical_value <- qchisq(0.95, df=2)
+critical_value
+cat("\n===============================================================================================\n")
+cat("\nWhite test:\n")
+print(lmtest::bptest(final_model, 
+                     ~ current_account * gross_capital_formation + 
+                       I(current_account^2) + I(gross_capital_formation^2),
+                     data = model_df))
+
+# ---- Plot (Improved Final) ----
+final_viz_df <- model_df %>%
+  mutate(
+    final_pred = predict(final_model, newdata = model_df),
+    final_resid = resid(final_model)
+  )
+
+p_final_rvf <- ggplot(final_viz_df, aes(x = final_pred, y = final_resid)) +
+  geom_point(alpha = 0.7) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(
+    title = "Residuals vs Fitted: Heteroskedasticity Check (Final)",
+    x = "Fitted Values",
+    y = "Residuals"
+  ) +
+  theme_minimal()
+
+print(p_final_rvf)
+
+############################################################
+# End of script
+############################################################
+```
+
+

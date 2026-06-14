@@ -1,0 +1,536 @@
+---
+title: "Dataset_Cleaning"
+output: html_document
+date: "2026-03-27"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r dataset cleaning}
+############################################################
+# Prepare dataset for GDP growth comparison + choropleth map
+#
+# PURPOSE OF THIS SCRIPT:
+# This script takes the raw dataset, cleans it, reshapes it,
+# checks for duplicate and invalid rows, creates ISO3 country codes,
+# gives long indicator names shorter variable names,
+# removes GDP per capita growth outliers,
+# drops very incomplete columns,
+# and saves the final cleaned file as Dataset_Cleaned.csv
+############################################################
+
+# ---- Packages ----
+packages <- c(
+  "tidyverse", "janitor", "countrycode"
+)
+
+to_install <- packages[!packages %in% installed.packages()[, "Package"]]
+if (length(to_install) > 0) install.packages(to_install)
+
+library(tidyverse)
+library(janitor)
+library(countrycode)
+
+# ----------------------------------------------------------
+# 0.5) DATASET DESCRIPTION (BEFORE cleaning)
+# This function prints a simple overview of the raw dataset:
+# - file name
+# - number of rows and columns
+# - column names
+# - data types
+# - missing values
+# - unique countries
+# - unique indicators
+# ----------------------------------------------------------
+describe_dataset <- function(df, name = "dataset") {
+  cat("\n================ DATASET DESCRIPTION ================\n")
+  cat("Dataset name:", name, "\n")
+  cat("Rows:", nrow(df), " | Columns:", ncol(df), "\n\n")
+  
+  cat("Column names:\n")
+  print(names(df))
+  
+  cat("\nColumn types:\n")
+  print(sapply(df, class))
+  
+  miss <- colSums(is.na(df))
+  cat("\nMissing values by column (NA count):\n")
+  print(miss)
+  
+  cat("\nTotal missing values in entire dataset (all NAs):\n")
+  print(sum(is.na(df)))
+  
+  # If the dataset contains a Country Name column,
+  # print all unique countries found in the raw data
+  if ("Country Name" %in% names(df)) {
+    countries_unique <- df %>%
+      distinct(`Country Name`) %>%
+      mutate(`Country Name` = str_squish(`Country Name`)) %>%
+      arrange(`Country Name`)
+    
+    cat("\nNumber of unique countries:", nrow(countries_unique), "\n")
+    cat("\n================ UNIQUE COUNTRIES (RAW) ================\n")
+    print(countries_unique)
+    cat("========================================================\n")
+  }
+  
+  # If the dataset contains a Series Name column,
+  # print all unique indicators found in the raw data
+  if ("Series Name" %in% names(df)) {
+    cat("\nNumber of unique indicators:", length(unique(df$`Series Name`)), "\n")
+    cat("\n================ UNIQUE INDICATORS (RAW) ================\n")
+    print(sort(unique(df$`Series Name`)))
+    cat("========================================================\n")
+  }
+  
+  cat("=====================================================\n\n")
+}
+
+# ----------------------------------------------------------
+# 1) Load raw dataset
+# The file should be saved in the same folder as this script
+# check.names = FALSE keeps original column names unchanged
+# ----------------------------------------------------------
+cat("\n[STEP 1] Loading raw dataset...\n")
+
+data_raw <- read.csv("dataset.csv", stringsAsFactors = FALSE, check.names = FALSE)
+
+# Print a description of the raw dataset before cleaning
+describe_dataset(data_raw, name = "Raw dataset.csv")
+
+# glimpse() gives a quick preview of the structure
+glimpse(data_raw)
+
+# ----------------------------------------------------------
+# 2) Basic Cleaning
+# Goal:
+# - remove bad rows such as file notes / update rows first
+# - standardise column names
+# - remove unnecessary metadata columns
+# - detect year columns
+# - reshape data from wide format to long format
+# ----------------------------------------------------------
+cat("\n[STEP 2] Starting basic cleaning...\n")
+
+# ----------------------------------------------------------
+# Remove invalid / metadata rows FIRST using original column names
+# These are not real country observations.
+# For example:
+# "Data from database: ..."
+# "Last Updated: ..."
+# ----------------------------------------------------------
+data_step0 <- data_raw %>%
+  mutate(
+    `Country Name` = str_squish(`Country Name`),
+    `Country Code` = str_squish(`Country Code`),
+    `Series Name`  = str_squish(`Series Name`)
+  ) %>%
+  filter(
+    !is.na(`Country Name`), `Country Name` != "",
+    !is.na(`Series Name`), `Series Name` != "",
+    !str_detect(`Country Name`, "^Data from database:"),
+    !str_detect(`Country Name`, "^Last Updated:")
+  )
+
+cat("\nRows after removing bad metadata rows:\n")
+cat("Rows:", nrow(data_step0), "\n")
+
+# clean_names() converts column names into lower-case snake_case
+# Example: "Country Name" -> "country_name"
+data_step1 <- data_step0 %>%
+  clean_names()
+
+cat("\nColumn names after clean_names():\n")
+print(names(data_step1))
+
+# Remove series_code if it exists
+# any_of() avoids errors if the column is not present
+data_step2 <- data_step1 %>%
+  select(-any_of(c("series_code")))
+
+# Make sure important columns exist before moving on
+stopifnot(all(c("country_name", "country_code", "series_name") %in% colnames(data_step2)))
+
+# Trim whitespace again after renaming to keep later steps safe
+data_step2 <- data_step2 %>%
+  mutate(
+    country_name = str_squish(country_name),
+    country_code = str_squish(country_code),
+    series_name  = str_squish(series_name)
+  )
+
+# ----------------------------------------------------------
+# Detect year columns automatically
+# This handles names like:
+# 2020
+# X2020
+# 2020_yr2020
+# X2020_yr2020
+# ----------------------------------------------------------
+year_cols <- colnames(data_step2)[
+  str_detect(colnames(data_step2), "^x?\\d{4}_yr\\d{4}$|^x?\\d{4}$")
+]
+
+cat("\nDetected year columns:\n")
+print(year_cols)
+
+if (length(year_cols) == 0) stop("No year columns found.")
+
+# ----------------------------------------------------------
+# Convert from wide format to long format
+# Before:
+# one row per country-indicator with years across columns
+#
+# After:
+# one row per country-year-indicator
+# ----------------------------------------------------------
+panel_long <- data_step2 %>%
+  pivot_longer(
+    cols = all_of(year_cols),
+    names_to = "year_raw",
+    values_to = "value"
+  ) %>%
+  mutate(
+    year = str_extract(year_raw, "\\d{4}") %>% as.integer(),
+    value = as.numeric(value)
+  ) %>%
+  select(country_name, country_code, series_name, year, value)
+
+# ----------------------------------------------------------
+# Handle duplicate rows if present
+# A duplicate means the same country + year + indicator appears
+# more than once.
+#
+# If duplicates are found, keep the first non-missing value.
+# ----------------------------------------------------------
+dup_check <- panel_long %>%
+  count(country_name, country_code, year, series_name) %>%
+  filter(n > 1)
+
+if (nrow(dup_check) > 0) {
+  cat("\nDuplicate country-year-indicator rows found:\n")
+  print(dup_check)
+  
+  panel_long <- panel_long %>%
+    group_by(country_name, country_code, year, series_name) %>%
+    summarise(value = first(na.omit(value)), .groups = "drop")
+}
+
+# ----------------------------------------------------------
+# Convert back from long format to wide format
+# Final result:
+# one row per country-year
+# each indicator becomes its own column
+# ----------------------------------------------------------
+panel_wide <- panel_long %>%
+  pivot_wider(
+    id_cols = c(country_name, country_code, year),
+    names_from = series_name,
+    values_from = value
+  ) %>%
+  clean_names()
+
+panel_model <- panel_wide
+
+cat("\nLoaded dataset columns:\n")
+print(colnames(panel_model))
+
+# ----------------------------------------------------------
+# 3) List all unique countries in cleaned panel dataset
+# This helps verify which countries remain after cleaning
+# ----------------------------------------------------------
+cat("\n[STEP 3] Listing all unique countries...\n")
+
+unique_countries <- panel_model %>%
+  distinct(country_name) %>%
+  arrange(country_name)
+
+cat("\n================ UNIQUE COUNTRIES ================\n")
+print(unique_countries)
+cat("Total unique countries:", nrow(unique_countries), "\n")
+cat("==================================================\n\n")
+
+# ----------------------------------------------------------
+# 4) Add ISO3 country codes
+# ISO3 is the standard 3-letter code used in maps and analysis
+# Example:
+# Ireland = IRL
+# Japan   = JPN
+#
+# If country_code is already valid, use it.
+# Otherwise, try converting from country_name.
+# ----------------------------------------------------------
+cat("\n[STEP 4] Creating ISO3 country codes...\n")
+
+panel_model <- panel_model %>%
+  mutate(country_name = str_squish(country_name))
+
+panel_model <- panel_model %>%
+  mutate(
+    iso3c = if_else(
+      str_detect(country_code, "^[A-Z]{3}$"),
+      country_code,
+      countrycode(country_name, origin = "country.name", destination = "iso3c")
+    )
+  )
+
+# Show unmatched countries, if any
+unmatched <- panel_model %>%
+  filter(is.na(iso3c)) %>%
+  distinct(country_name)
+
+if (nrow(unmatched) > 0) {
+  cat("\nCountries not matched to ISO3:\n")
+  print(unmatched)
+} else {
+  cat("\nAll countries matched to ISO3 successfully.\n")
+}
+
+# ----------------------------------------------------------
+# 5) Rename indicator columns to shorter and clearer names
+#
+# Why this step matters:
+# Raw indicator names from sources like IMF / World Bank are often
+# very long and hard to use in analysis.
+#
+# This function:
+# - keeps key ID columns as simple names
+# - gives known variables standard short names
+# - converts all other columns into safe snake_case names
+# ----------------------------------------------------------
+cat("\n[STEP 5] Rename indicator columns to shorter and clearer names...\n")
+
+rename_to_short <- function(df) {
+  old_names <- names(df)
+  new_names <- old_names
+  
+  # Keep identifying columns simple and consistent
+  new_names <- ifelse(old_names == "country_name", "country", new_names)
+  new_names <- ifelse(old_names == "country_code", "country_code", new_names)
+  new_names <- ifelse(old_names == "year", "year", new_names)
+  new_names <- ifelse(old_names == "iso3c", "iso3c", new_names)
+  
+  # Rename common economics variables to shorter names
+  # Only rename when the matching column actually exists
+  new_names <- ifelse(
+    str_detect(old_names, "^gdp_growth_annual_percent$|^gdp_growth$|^real_gdp_growth$"),
+    "gdp_growth",
+    new_names
+  )
+  
+  new_names <- ifelse(
+    str_detect(old_names, "gdp_per_capita_growth"),
+    "gdp_pc_growth",
+    new_names
+  )
+  
+  new_names <- ifelse(
+    str_detect(old_names, "inflation_consumer_prices"),
+    "inflation",
+    new_names
+  )
+  
+  new_names <- ifelse(
+    str_detect(old_names, "gross_capital_formation"),
+    "gross_capital_formation_pct_gdp",
+    new_names
+  )
+  
+  new_names <- ifelse(
+    str_detect(old_names, "current_account_balance"),
+    "current_account_balance_pct_gdp",
+    new_names
+  )
+  
+  new_names <- ifelse(
+    str_detect(old_names, "labor_force_participation_rate"),
+    "labour_force_participation",
+    new_names
+  )
+  
+  new_names <- ifelse(
+    str_detect(old_names, "exports_of_goods_and_services"),
+    "exports_pct_gdp",
+    new_names
+  )
+  
+  new_names <- ifelse(
+    str_detect(old_names, "net_lending_net_borrowing"),
+    "fiscal_balance_pct_gdp",
+    new_names
+  )
+  
+  # For all remaining columns that were not manually renamed:
+  # clean them into simple snake_case variable names
+  generic_idx <- new_names == old_names &
+    !(old_names %in% c("country_name", "country_code", "year", "iso3c"))
+  
+  new_names[generic_idx] <- old_names[generic_idx] %>%
+    str_replace_all("&", " and ") %>%
+    str_replace_all("\\+", " plus ") %>%
+    str_replace_all("%", " percent ") %>%
+    str_replace_all("/", " ") %>%
+    str_replace_all("\\(", " ") %>%
+    str_replace_all("\\)", " ") %>%
+    str_replace_all(",", " ") %>%
+    str_replace_all("-", " ") %>%
+    str_squish() %>%
+    str_to_lower() %>%
+    str_replace_all("[^a-z0-9]+", "_") %>%
+    str_replace_all("^_|_$", "")
+  
+  # make.unique() prevents duplicate column names
+  new_names <- make.unique(new_names, sep = "_")
+  names(df) <- new_names
+  df
+}
+
+panel_short <- rename_to_short(panel_model)
+
+cat("\nColumns after renaming:\n")
+print(colnames(panel_short))
+
+# ----------------------------------------------------------
+# 6) Check GDP variables properly
+# We want to make sure the dataset includes gdp_pc_growth.
+# gdp_growth may or may not exist separately.
+# ----------------------------------------------------------
+cat("\n[STEP 6] Checking GDP-related variables...\n")
+
+if (!("gdp_pc_growth" %in% names(panel_short))) {
+  stop("No gdp_pc_growth variable found.")
+}
+
+if ("gdp_growth" %in% names(panel_short)) {
+  cat("\nA separate gdp_growth variable exists in the dataset.\n")
+} else {
+  cat("\nNo separate gdp_growth variable exists in this dataset.\n")
+  cat("Keeping only gdp_pc_growth as the GDP-related growth variable.\n")
+}
+
+# ----------------------------------------------------------
+# 7) Remove outliers in gdp_pc_growth using the IQR rule
+#
+# Layman explanation:
+# Outliers are unusually extreme values that are far away
+# from most other observations.
+#
+# IQR method:
+# lower bound = Q1 - 1.5*IQR
+# upper bound = Q3 + 1.5*IQR
+#
+# Rows outside these bounds are removed only for gdp_pc_growth.
+# ----------------------------------------------------------
+cat("\n[STEP 7] Checking and removing outliers in gdp_pc_growth...\n")
+
+if ("gdp_pc_growth" %in% names(panel_short)) {
+  q1 <- quantile(panel_short$gdp_pc_growth, 0.25, na.rm = TRUE)
+  q3 <- quantile(panel_short$gdp_pc_growth, 0.75, na.rm = TRUE)
+  iqr_value <- IQR(panel_short$gdp_pc_growth, na.rm = TRUE)
+  
+  lower_bound <- q1 - 1.5 * iqr_value
+  upper_bound <- q3 + 1.5 * iqr_value
+  
+  rows_before <- nrow(panel_short)
+  
+  outliers_removed <- panel_short %>%
+    filter(!is.na(gdp_pc_growth)) %>%
+    filter(gdp_pc_growth < lower_bound | gdp_pc_growth > upper_bound) %>%
+    select(country, year, gdp_pc_growth)
+  
+  panel_short <- panel_short %>%
+    filter(is.na(gdp_pc_growth) | (gdp_pc_growth >= lower_bound & gdp_pc_growth <= upper_bound))
+  
+  rows_after <- nrow(panel_short)
+  
+  cat("\nOutlier removal for gdp_pc_growth completed.\n")
+  cat("Lower bound:", lower_bound, "\n")
+  cat("Upper bound:", upper_bound, "\n")
+  cat("Rows removed:", rows_before - rows_after, "\n")
+  
+  if (nrow(outliers_removed) > 0) {
+    cat("\nRemoved outlier rows:\n")
+    print(outliers_removed)
+  } else {
+    cat("\nNo outliers found in gdp_pc_growth.\n")
+  }
+}
+
+# ----------------------------------------------------------
+# 8a) Remove selected columns from final output
+# country_code is removed because iso3c is kept instead
+# ----------------------------------------------------------
+cat("\n[STEP 8a] Removing unnecessary columns...\n")
+
+panel_short <- panel_short %>%
+  select(-any_of(c("country_code")))
+
+cat("\nRemoved from final output (if present): country_code\n")
+
+# ----------------------------------------------------------
+# 8b) Remove empty columns + high-missing columns
+#
+# First:
+# remove columns that are completely empty
+#
+# Then:
+# move key columns to the front for readability
+#
+# Finally:
+# drop columns with more than 40% missing values,
+# except for important core variables we want to keep
+# ----------------------------------------------------------
+cat("\n[STEP 8b] Removing empty and highly incomplete columns...\n")
+
+# Remove columns where every value is NA
+panel_short <- panel_short %>%
+  select(where(~ !all(is.na(.))))
+
+# Put key columns first, but only if they exist
+first_cols <- c("country", "iso3c", "year", "gdp_growth", "gdp_pc_growth")
+existing_first_cols <- first_cols[first_cols %in% names(panel_short)]
+
+panel_short <- panel_short %>%
+  relocate(all_of(existing_first_cols))
+
+# Calculate missing-value share for each column
+missing_share <- sapply(panel_short, function(x) mean(is.na(x)))
+
+# Keep these columns even if they exceed 40% missing
+keep_core <- c("country", "iso3c", "year", "gdp_growth", "gdp_pc_growth")
+
+# Identify columns to drop
+drop_cols <- names(missing_share[missing_share > 0.40])
+drop_cols <- setdiff(drop_cols, keep_core)
+
+# Drop highly missing columns
+panel_short <- panel_short %>%
+  select(-any_of(drop_cols))
+
+cat("\nDropped columns (>40% missing):\n")
+print(drop_cols)
+
+# ----------------------------------------------------------
+# 9) Final dataset overview
+# This gives a quick check of the finished cleaned dataset
+# ----------------------------------------------------------
+cat("\n[STEP 9] Final dataset overview...\n")
+
+cat("\nFinal cleaned dataset columns:\n")
+print(colnames(panel_short))
+
+cat("\nFinal cleaned dataset dimensions:\n")
+cat("Rows:", nrow(panel_short), " | Columns:", ncol(panel_short), "\n")
+
+# ----------------------------------------------------------
+# 10) Save final cleaned dataset
+# This writes the final cleaned file to the working folder
+# ----------------------------------------------------------
+cat("\n[STEP 10] Saving cleaned dataset...\n")
+
+write.csv(panel_short, "Dataset_Cleaned.csv", row.names = FALSE)
+
+cat("\nSaved Dataset_Cleaned.csv\n")
+```
